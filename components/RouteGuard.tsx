@@ -14,7 +14,17 @@ export function RouteGuard({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    if (isLoading) return;
+    // Timeout fallback - if loading takes too long, proceed anyway
+    const timeout = setTimeout(() => {
+      if (isLoading) {
+        console.warn("Auth loading timeout - proceeding anyway");
+        setIsReady(true);
+      }
+    }, 5000); // 5 second timeout
+
+    if (isLoading) {
+      return () => clearTimeout(timeout);
+    }
 
     const isPublicRoute = PUBLIC_ROUTES.includes(pathname);
 
@@ -25,6 +35,8 @@ export function RouteGuard({ children }: { children: React.ReactNode }) {
     } else {
       setIsReady(true);
     }
+
+    return () => clearTimeout(timeout);
   }, [isLoggedIn, isLoading, pathname, router]);
 
   if (!isReady) return <LoadingSkeleton />;

@@ -22,7 +22,7 @@ export function useAuth(): UseAuthReturn {
   // Helper functions
   const clearError = () => setError(null);
 
-  const fetchUserProfile = async (userId: string, userEmail: string) => {
+  const fetchUserProfile = async (userId: string, userEmail: string, retryCount = 0) => {
     try {
       const [profileResponse, usageResponse] = await Promise.all([
         supabase.from("profiles").select("*").eq("user_id", userId).single(),
@@ -34,7 +34,26 @@ export function useAuth(): UseAuthReturn {
           .maybeSingle(),
       ]);
 
-      if (profileResponse.error) throw profileResponse.error;
+      // If profile doesn't exist yet (might be creating via trigger), retry once
+      if (profileResponse.error && profileResponse.error.code === 'PGRST116' && retryCount < 2) {
+        console.log("Profile not found, retrying in 500ms...");
+        await new Promise(resolve => setTimeout(resolve, 500));
+        return fetchUserProfile(userId, userEmail, retryCount + 1);
+      }
+
+      if (profileResponse.error) {
+        console.error("Error fetching profile:", profileResponse.error);
+        // Don't sign out - just set a minimal user object
+        setUser({
+          user_id: userId,
+          email: userEmail,
+          name: userEmail.split('@')[0],
+          subscription_plan: 'free',
+          tasks_created: usageResponse.data?.tasks_created || 0,
+        } as User);
+        setIsLoading(false);
+        return;
+      }
 
       setUser({
         ...profileResponse.data,
@@ -42,8 +61,16 @@ export function useAuth(): UseAuthReturn {
         tasks_created: usageResponse.data?.tasks_created || 0,
       });
     } catch (error) {
-      console.error("Critical error fetching user profile:", error);
-      await signOut();
+      console.error("Error fetching user profile:", error);
+      // Don't sign out on error - allow user to continue
+      // Set minimal user data so app doesn't break
+      setUser({
+        user_id: userId,
+        email: userEmail,
+        name: userEmail.split('@')[0],
+        subscription_plan: 'free',
+        tasks_created: 0,
+      } as User);
     } finally {
       setIsLoading(false);
     }
@@ -132,23 +159,42 @@ export function useAuth(): UseAuthReturn {
   useEffect(() => {
     const initAuth = async () => {
       try {
+        // Get session - this should work after OAuth redirect
         const {
           data: { session },
+          error,
         } = await supabase.auth.getSession();
+        
+        if (error) {
+          console.error("Error getting session:", error);
+          setError(error.message);
+          return;
+        }
+        
+        console.log("Initial session check:", session?.user?.email || "No session");
         await updateSessionState(session);
       } catch (error: any) {
         console.error("Error initializing auth:", error);
         setError(error.message);
-        await signOut();
       }
     };
 
     initAuth();
 
+    // Listen for auth state changes (including OAuth callbacks)
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      updateSessionState(session);
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log("Auth state changed:", event, session?.user?.email || "No session");
+      
+      // Handle OAuth sign in
+      if (event === 'SIGNED_IN' && session) {
+        await updateSessionState(session);
+      } else if (event === 'SIGNED_OUT') {
+        await updateSessionState(null);
+      } else {
+        await updateSessionState(session);
+      }
     });
 
     return () => subscription.unsubscribe();
